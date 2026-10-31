@@ -5,6 +5,8 @@
 - Phase 1 (built): an agent reviews Jira requirements, and a verification loop checks the result
 - Phase 2 (next): event-based agents. Phase 3 (next): self-improving agents
 
+**App link** - https://requirements-review-agent.streamlit.app/
+
 ## Current use case: reviewing Jira requirements
 - The agent reads a Jira requirement and reviews it using the instructions in `workspace/memories/AGENTS.md`
 - It writes a report (`analysis.md`) with five sections:
