@@ -5,25 +5,34 @@ Run:  streamlit run app.py      (then open the printed local URL)
 
 Flow: pick or add a Jira -> edit its text -> Run deep agent -> read the report
 and trace -> check against the rubric -> optionally run the verification loop.
-All logic lives in core.py; this file only wires the screen.
+Every review is saved to the run history (Neon if configured, else a local file).
+All logic lives in core.py and history.py; this file only wires the screen.
 """
 
 import html
+import json
 import os
 import threading
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
 st.set_page_config(page_title="Requirements review agent", layout="wide")
 
-# Layout polish: less space at the top, larger small text, tidier button rows.
+# Layout polish: sticky header, less top space, larger small text, tidier rows.
 st.html("""
 <style>
 html { font-size: 17.5px; }
 header[data-testid="stHeader"] { height: 2.5rem; }
 div[data-testid="stMainBlockContainer"], .block-container { padding-top: 3rem; padding-bottom: 2rem; }
+div:has(> .st-key-app_header) {
+    position: sticky; top: 3.75rem; z-index: 990;
+    background: var(--background-color, #ffffff);
+}
+.st-key-app_header { padding: 0.3rem 0 0.4rem 0; border-bottom: 1px solid rgba(128,128,128,0.25); }
+.st-key-app_header h1 { font-size: 1.9rem; padding: 0; margin: 0; }
 h1 { padding-top: 0; margin-top: 0; }
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { font-size: 1rem !important; }
 [data-testid="stFileUploaderDropzoneInstructions"] * { font-size: 1rem !important; }
@@ -34,14 +43,16 @@ div[data-testid="stButton"] button p, div[data-testid="stDownloadButton"] button
 """)
 
 load_dotenv(override=True)
-# On Streamlit Community Cloud the key comes from the app's Secrets settings.
-try:
-    if not os.environ.get("GROQ_API_KEY") and "GROQ_API_KEY" in st.secrets:
-        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-except Exception:  # noqa: BLE001  (no secrets file locally is fine)
-    pass
+# On Streamlit Community Cloud the keys come from the app's Secrets settings.
+for _key in ("GROQ_API_KEY", "NEON_DATABASE_URL"):
+    try:
+        if not os.environ.get(_key) and _key in st.secrets:
+            os.environ[_key] = st.secrets[_key]
+    except Exception:  # noqa: BLE001  (no secrets file locally is fine)
+        pass
 
-import core  # noqa: E402  (after the key is set)
+import core  # noqa: E402  (after the keys are set)
+import history  # noqa: E402
 from visualization_helpers import (  # noqa: E402
     render_report, render_review_trace, render_verification_summary,
     render_grading_grid, render_grader_feedback, render_report_progression,
@@ -121,6 +132,28 @@ def _guarded(label, fn):
         lock.release()
 
 
+def _save_history(label, fn):
+    """History problems must never lose the run the user just made."""
+    try:
+        out = fn()
+        state["history"] = None  # reload the list next time it is shown
+        return out
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"The run worked, but it could not be saved to the history ({label}): {e}")
+        return None
+
+
+def _history() -> list:
+    if state.get("history") is None:
+        try:
+            state["history"] = core.list_history()
+            state["history_error"] = ""
+        except Exception as e:  # noqa: BLE001
+            state["history"] = []
+            state["history_error"] = f"Could not load the history: {e}"
+    return state["history"]
+
+
 # ---------------------------------------------------------------------------
 # Session setup (before any widget is created)
 # ---------------------------------------------------------------------------
@@ -143,8 +176,9 @@ def _on_ticket_change():
 # Screen
 # ---------------------------------------------------------------------------
 
-st.title("Requirements review agent")
-st.caption(f"Model: `{core.MODEL}`")
+with st.container(key="app_header"):
+    st.title("Requirements review agent")
+    st.caption(f"Model: `{core.MODEL}`")
 
 st.subheader("1. Choose and edit the Jira")
 left, right = st.columns([1, 3])
@@ -187,6 +221,7 @@ if run_clicked:
             run = res["run"]
             state["prev_review"] = state.get("last_review")
             state["last_review"] = res
+            state["last_review_id"] = _save_history("deep agent run", lambda: core.save_review(res))
             state["review_view"] = {
                 "ticket_id": tid,
                 "report": render_report(run.analysis_markdown or "(the agent produced no report)",
@@ -209,8 +244,8 @@ if state.get("notice"):
 
 st.subheader("2. Deep agent result")
 view = state.get("review_view")
-tab_report, tab_trace, tab_prev, tab_agents = st.tabs(
-    ["Report", "Trace", "Previous run", "AGENTS.md (read-only)"])
+tab_report, tab_trace, tab_hist, tab_agents = st.tabs(
+    ["analysis.md", "Trace", "Run history (last 30)", "AGENTS.md (read-only)"])
 with tab_report:
     if view:
         st.markdown(view["info"])
@@ -223,18 +258,68 @@ with tab_trace:
         _page(view["trace"], 460)
     else:
         st.info("Run the deep agent to see the step-by-step trace here.")
-with tab_prev:
-    prev, last = state.get("prev_review"), state.get("last_review")
-    if prev and last:
-        pc, lc = st.columns(2)
-        with pc:
-            st.caption(f"Previous run ({prev['ticket_id']})")
-            _page(render_report(prev["analysis_markdown"], title="Previous run", icon="", muted=True).data, 620)
-        with lc:
-            st.caption(f"Latest run ({last['ticket_id']})")
-            _page(render_report(last["analysis_markdown"], title="Latest run", icon="").data, 620)
+with tab_hist:
+    records = _history()
+    top1, top2, top3, top4 = st.columns([3, 1, 1.2, 1.4], vertical_alignment="center")
+    top1.caption(f"Stored in: {core.history_description()}")
+    if top2.button("Refresh", key="hist_refresh", width="stretch"):
+        state["history"] = None
+        st.rerun()
+    if state.get("history_error"):
+        st.error(state["history_error"])
+    if not records:
+        st.info("No runs saved yet. Run the deep agent and it will appear here.")
     else:
-        st.info("No previous run yet. Edit the ticket and run again to compare.")
+        summary = pd.DataFrame(history.summary_rows(records))
+        top3.download_button("Export JSON", json.dumps(records, indent=2), file_name="run_history.json",
+                             mime="application/json", key="hist_export_json", width="stretch")
+        top4.download_button("Export summary CSV", summary.to_csv(index=False), file_name="run_history.csv",
+                             mime="text/csv", key="hist_export_csv", width="stretch")
+        event = st.dataframe(summary, hide_index=True, width="stretch", on_select="rerun",
+                             selection_mode="single-row", key="hist_table")
+        picked = event.selection.rows if event and event.selection else []
+        idx = picked[0] if picked and picked[0] < len(records) else 0
+        rec = records[idx]
+
+        st.markdown(f"**{rec.get('ticket_id', '')}**, saved {summary.iloc[idx]['Time']}, "
+                    f"{summary.iloc[idx]['Tokens']:,} tokens. "
+                    + ("Showing the newest run. Click a row above to open another."
+                       if not picked else "Showing the selected run."))
+        badge_colours = {"agent": "blue", "check": "orange", "verify": "green"}
+        bcols = st.columns([1, 1, 1, 5])
+        for i, kind in enumerate(rec.get("kinds", [])):
+            with bcols[i]:
+                st.badge(history.STEP_LABELS.get(kind, kind), color=badge_colours.get(kind, "gray"))
+        st.caption(f"Rubric result: {history.rubric_result(rec)}"
+                   + (". Report shown is the verified version." if rec.get("verify") else "."))
+
+        latest = (state.get("last_review") or {}).get("analysis_markdown")
+        compare = st.checkbox("Compare with the latest run in this session", key="hist_compare",
+                              disabled=not latest)
+        shown = history.result_report(rec) or "(no report saved)"
+        if compare and latest:
+            c_a, c_b = st.columns(2)
+            with c_a:
+                st.caption("Selected run")
+                _page(render_report(shown, title="Selected run", icon="", muted=True).data, 560)
+            with c_b:
+                st.caption("Latest run")
+                _page(render_report(latest, title="Latest run", icon="").data, 560)
+        else:
+            _page(render_report(shown, title="Result report", icon="").data, 560)
+
+        if rec.get("verify") and (rec.get("agent") or {}).get("report"):
+            with st.expander("Deep agent report (before verification)"):
+                _page(render_report(rec["agent"]["report"], title="Deep agent report", icon="",
+                                    muted=True).data, 480)
+        if rec.get("check"):
+            with st.expander("Rubric check"):
+                _page(_check_html(rec["check"]), 230)
+        if rec.get("verify"):
+            with st.expander("Verification loop"):
+                v = rec["verify"]
+                seq = " then ".join(g["result"] for g in v.get("grading", [])) or "grader never ran"
+                st.markdown(f"Verdicts: {seq}. Final status: {v.get('status') or 'unknown'}.")
 with tab_agents:
     st.code(core.read_agents_md(), language="markdown")
 
@@ -255,6 +340,10 @@ if check_clicked:
                                               last["analysis_markdown"]))
         if res:
             state["check_view"] = {"html": _check_html(res), "usage": core.usage_line(res["usage"])}
+            if state.get("last_review_id"):
+                _save_history("rubric check", lambda: core.save_check(state["last_review_id"], res))
+                if state.get("history") is None:  # saved: refresh the history tab above
+                    st.rerun()
 
 if loop_clicked:
     if not state["text"].strip():
@@ -275,6 +364,14 @@ if loop_clicked:
                                                        run.analysis_markdown).data if g else ""),
                 "usage": f"{core.usage_line(res['usage'])}\n\nSaved to `{_rel(res['archive'])}`",
             }
+            # Attach to the last review only if it was made from the same ticket text.
+            last = state.get("last_review")
+            same = bool(last and last["ticket_id"] == tid
+                        and history.text_hash(last["requirement_doc"]) == history.text_hash(state["text"]))
+            _save_history("verification loop", lambda: core.save_verify(
+                state.get("last_review_id") if same else None, tid, state["text"], res))
+            if state.get("history") is None:  # saved: refresh the history tab above
+                st.rerun()
 
 cv = state.get("check_view")
 if cv:

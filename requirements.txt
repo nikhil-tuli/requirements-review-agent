@@ -10,3 +10,4 @@ python-dotenv
 matplotlib
 jinja2
 ipython
+psycopg[binary]==3.3.6

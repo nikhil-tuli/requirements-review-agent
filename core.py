@@ -236,3 +236,69 @@ def run_verification(ticket_id: str, requirement_doc: str, iterations: int = 3,
     return {"kind": "verification", "ticket_id": ticket_id, "requirement_doc": requirement_doc,
             "run": run, "analysis_markdown": run.analysis_markdown,
             "usage": usage, "archive": str(folder)}
+
+
+# ---------------------------------------------------------------------------
+# History (newest 30 reviews)
+# ---------------------------------------------------------------------------
+
+import history  # noqa: E402
+
+_STORE = None
+
+
+def history_store():
+    """Neon when NEON_DATABASE_URL is set and reachable, otherwise runs/history.json."""
+    global _STORE
+    if _STORE is None:
+        _STORE = history.get_store(RUNS_DIR / "history.json")
+    return _STORE
+
+
+def history_description() -> str:
+    store = history_store()
+    return store.describe() + (f". {store.note}" if store.note else "")
+
+
+def _hashes():
+    return history.text_hash(read_agents_md()), history.text_hash(RUBRIC)
+
+
+def save_review(res: Dict[str, Any]) -> str:
+    """Start a history record from a deep agent run. Returns the record id."""
+    rec = history.base_record(res["ticket_id"], res["requirement_doc"], MODEL, *_hashes())
+    history.attach_agent(rec, res)
+    store = history_store()
+    store.add(rec)
+    store.prune(history.MAX_RUNS)
+    return rec["id"]
+
+
+def save_check(review_id: str, res: Dict[str, Any]) -> None:
+    store = history_store()
+    rec = store.get(review_id)
+    if rec is None:
+        raise KeyError("That review is no longer in the history (only the newest 30 are kept).")
+    history.attach_check(rec, res)
+    store.update(review_id, rec)
+
+
+def save_verify(review_id: Optional[str], ticket_id: str, requirement_doc: str,
+                res: Dict[str, Any]) -> str:
+    """Attach a verification loop result to a review, or start a new record."""
+    store = history_store()
+    rec = store.get(review_id) if review_id else None
+    is_new = rec is None
+    if is_new:
+        rec = history.base_record(ticket_id, requirement_doc, MODEL, *_hashes())
+    history.attach_verify(rec, res)
+    if is_new:
+        store.add(rec)
+        store.prune(history.MAX_RUNS)
+    else:
+        store.update(rec["id"], rec)
+    return rec["id"]
+
+
+def list_history() -> List[Dict[str, Any]]:
+    return history_store().list(history.MAX_RUNS)

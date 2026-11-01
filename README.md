@@ -30,7 +30,10 @@
 - **Check against rubric:** the grader scores the report once and lists the gaps
 - **Run verification loop:** the agent runs, the grader checks the file, failed criteria are sent back as feedback, the agent revises, and the grader checks again (up to 3 passes)
 - **Fix and re-run:** edit the ticket, run again, and compare with the previous run
-- Every run is saved in `runs/` (report, trace, token usage)
+- Every review is saved to the **Run history (last 30)** tab: one row per review, with badges for the steps done (Agent, Rubric check, Verified), the rubric result and tokens
+  - A rubric check or verification loop on the same ticket text is added to the same review. The report shown is the verified one if it exists
+  - Export the history as JSON or CSV from that tab
+- Files for each run (report, trace, token usage) are also written to `runs/`
 - Runs happen one at a time (a second user is asked to retry)
 
 ## Tools and model
@@ -39,6 +42,7 @@
 - Model connector: `langchain-groq`
 - UI: Streamlit
 - Display: pandas, mistune. Config: python-dotenv
+- Run history: Neon (hosted Postgres) through `psycopg`, with a local file fallback
 - Optional tracing: LangSmith (set keys in `.env`)
 
 ## Next phases
@@ -53,6 +57,7 @@
 4. `pip install -r requirements.txt`
 5. `cp .env.example .env` (Windows: `copy .env.example .env`)
 6. Open `.env` and set `GROQ_API_KEY=` to your key from console.groq.com/keys
+7. Optional: set `NEON_DATABASE_URL=` in `.env` to keep the history in Neon. Without it, history is saved in `runs/history.json`. If Neon cannot be reached, the app falls back to the local file and says so
 
 ## Usage
 1. `streamlit run app.py`
@@ -68,15 +73,16 @@
   - Each user uses their own free Codespaces hours
 - **Streamlit Community Cloud:**
   - Deploy the GitHub repo at share.streamlit.io with `app.py` as the main file
-  - Add `GROQ_API_KEY` in the app's Secrets settings (see `.streamlit/secrets.toml.example`)
+  - Add `GROQ_API_KEY` (and `NEON_DATABASE_URL` so history survives restarts) in the app's Secrets settings (see `.streamlit/secrets.toml.example`)
   - Everyone who opens the link shares one key and its limits
 
 ## Files
-- `app.py` screen, `core.py` run logic (reusable by schedulers and webhooks)
+- `app.py` screen, `core.py` run logic (reusable by schedulers and webhooks), `history.py` run history storage
 - `deepagent_helpers.py`, `visualization_helpers.py` agent and display helpers
 - `rubric.md`, `workspace/memories/AGENTS.md`, `jira_tickets.json` rubric, instructions and tickets
 - `.devcontainer/` Codespaces setup
 
 ## Notes
 - Groq's free plan allows 8,000 tokens per minute for this model, and one agent turn can exceed that. Adding a payment method (Developer plan) avoids the limit; a typical run costs cents
+- All visitors of one hosted app share the same history. Do not keep sensitive requirements there until login is added
 - Python 3.10 or newer is required
