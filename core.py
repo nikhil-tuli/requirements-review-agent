@@ -264,9 +264,14 @@ def _hashes():
     return history.text_hash(read_agents_md()), history.text_hash(RUBRIC)
 
 
-def save_review(res: Dict[str, Any]) -> str:
-    """Start a history record from a deep agent run. Returns the record id."""
-    rec = history.base_record(res["ticket_id"], res["requirement_doc"], MODEL, *_hashes())
+def save_review(res: Dict[str, Any], source: str = "manual", commit: str = "",
+                actor: str = "", trigger: str = "") -> str:
+    """Start a history record from a deep agent run. Returns the record id.
+
+    source is "manual" for runs from the app and "event" for runs started by GitHub.
+    """
+    rec = history.base_record(res["ticket_id"], res["requirement_doc"], MODEL, *_hashes(),
+                              source=source, commit=commit, actor=actor, trigger=trigger)
     history.attach_agent(rec, res)
     store = history_store()
     store.add(rec)
@@ -302,3 +307,15 @@ def save_verify(review_id: Optional[str], ticket_id: str, requirement_doc: str,
 
 def list_history() -> List[Dict[str, Any]]:
     return history_store().list(history.MAX_RUNS)
+
+
+def already_reviewed(ticket_id: str, requirement_doc: str) -> bool:
+    """True if the history already holds a deep agent run for this exact ticket text."""
+    wanted = history.text_hash(requirement_doc)
+    return any(r.get("ticket_id") == ticket_id and r.get("ticket_hash") == wanted
+               and "agent" in r.get("kinds", [])
+               for r in list_history())
+
+
+def get_record(rec_id: str) -> Optional[Dict[str, Any]]:
+    return history_store().get(rec_id)

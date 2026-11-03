@@ -244,8 +244,11 @@ if state.get("notice"):
 
 st.subheader("2. Deep agent result")
 view = state.get("review_view")
+HIST_TAB = "Run history (last 30)"
+linked_run = st.query_params.get("run", "")
 tab_report, tab_trace, tab_hist, tab_agents = st.tabs(
-    ["analysis.md", "Trace", "Run history (last 30)", "AGENTS.md (read-only)"])
+    ["analysis.md", "Trace", HIST_TAB, "AGENTS.md (read-only)"],
+    default=HIST_TAB if linked_run else None)
 with tab_report:
     if view:
         st.markdown(view["info"])
@@ -270,56 +273,110 @@ with tab_hist:
     if not records:
         st.info("No runs saved yet. Run the deep agent and it will appear here.")
     else:
-        summary = pd.DataFrame(history.summary_rows(records))
         top3.download_button("Export JSON", json.dumps(records, indent=2), file_name="run_history.json",
                              mime="application/json", key="hist_export_json", width="stretch")
-        top4.download_button("Export summary CSV", summary.to_csv(index=False), file_name="run_history.csv",
-                             mime="text/csv", key="hist_export_csv", width="stretch")
-        event = st.dataframe(summary, hide_index=True, width="stretch", on_select="rerun",
-                             selection_mode="single-row", key="hist_table")
-        picked = event.selection.rows if event and event.selection else []
-        idx = picked[0] if picked and picked[0] < len(records) else 0
-        rec = records[idx]
-
-        st.markdown(f"**{rec.get('ticket_id', '')}**, saved {summary.iloc[idx]['Time']}, "
-                    f"{summary.iloc[idx]['Tokens']:,} tokens. "
-                    + ("Showing the newest run. Click a row above to open another."
-                       if not picked else "Showing the selected run."))
-        badge_colours = {"agent": "blue", "check": "orange", "verify": "green"}
-        bcols = st.columns([1, 1, 1, 5])
-        for i, kind in enumerate(rec.get("kinds", [])):
-            with bcols[i]:
-                st.badge(history.STEP_LABELS.get(kind, kind), color=badge_colours.get(kind, "gray"))
-        st.caption(f"Rubric result: {history.rubric_result(rec)}"
-                   + (". Report shown is the verified version." if rec.get("verify") else "."))
-
-        latest = (state.get("last_review") or {}).get("analysis_markdown")
-        compare = st.checkbox("Compare with the latest run in this session", key="hist_compare",
-                              disabled=not latest)
-        shown = history.result_report(rec) or "(no report saved)"
-        if compare and latest:
-            c_a, c_b = st.columns(2)
-            with c_a:
-                st.caption("Selected run")
-                _page(render_report(shown, title="Selected run", icon="", muted=True).data, 560)
-            with c_b:
-                st.caption("Latest run")
-                _page(render_report(latest, title="Latest run", icon="").data, 560)
+        top4.download_button("Export summary CSV",
+                             pd.DataFrame(history.summary_rows(records)).to_csv(index=False),
+                             file_name="run_history.csv", mime="text/csv",
+                             key="hist_export_csv", width="stretch")
+        source_filter = st.segmented_control("Source", ["All", "Manual", "Event-driven"],
+                                             default="All", key="hist_source", selection_mode="single") or "All"
+        wanted = {"All": None, "Manual": "manual", "Event-driven": "event"}[source_filter]
+        shown_records = [r for r in records if wanted is None or history.source_of(r) == wanted]
+        if not shown_records:
+            st.info(f"No {source_filter.lower()} runs in the last 30.")
         else:
-            _page(render_report(shown, title="Result report", icon="").data, 560)
+            summary = pd.DataFrame(history.summary_rows(shown_records))
+            event = st.dataframe(summary, hide_index=True, width="stretch", on_select="rerun",
+                                 selection_mode="single-row", key="hist_table")
+            picked = event.selection.rows if event and event.selection else []
+            if picked and picked[0] < len(shown_records):
+                rec, how = shown_records[picked[0]], "Showing the selected run."
+                idx = picked[0]
+            else:
+                linked = next((r for r in records if r["id"] == linked_run), None) if linked_run else None
+                if linked_run and linked is None:
+                    linked = core.get_record(linked_run)  # may be older than the newest 30
+                if linked:
+                    rec, how = linked, "Opened from a link."
+                    idx = next((i for i, r in enumerate(shown_records) if r["id"] == linked["id"]), None)
+                else:
+                    rec, how, idx = shown_records[0], "Showing the newest run. Click a row above to open another.", 0
+                    if linked_run:
+                        how = "That linked run is no longer in the history. " + how
+            when = rec["created_at"][:16].replace("T", " ") + " UTC"
+            st.markdown(f"**{rec.get('ticket_id', '')}**, saved {when}, "
+                        f"{int(rec.get('tokens_total', 0) or 0):,} tokens. {how}")
+            badge_colours = {"agent": "blue", "check": "orange", "verify": "green"}
+            bcols = st.columns([1, 1, 1, 1, 4])
+            with bcols[0]:
+                st.badge(history.source_label(rec), color="violet" if history.source_of(rec) == "event" else "gray")
+            for i, kind in enumerate(rec.get("kinds", [])):
+                with bcols[i + 1]:
+                    st.badge(history.STEP_LABELS.get(kind, kind), color=badge_colours.get(kind, "gray"))
+            if history.source_of(rec) == "event":
+                who = f" by {rec['actor']}" if rec.get("actor") else ""
+                st.caption(f"Run by GitHub on commit {(rec.get('commit') or '')[:7] or 'unknown'}{who}"
+                           + (" (started by hand)." if rec.get("trigger") == "dispatch" else "."))
+            st.caption(f"Rubric result: {history.rubric_result(rec)}"
+                       + (". Report shown is the verified version." if rec.get("verify") else "."))
 
-        if rec.get("verify") and (rec.get("agent") or {}).get("report"):
-            with st.expander("Deep agent report (before verification)"):
-                _page(render_report(rec["agent"]["report"], title="Deep agent report", icon="",
-                                    muted=True).data, 480)
-        if rec.get("check"):
-            with st.expander("Rubric check"):
-                _page(_check_html(rec["check"]), 230)
-        if rec.get("verify"):
-            with st.expander("Verification loop"):
-                v = rec["verify"]
-                seq = " then ".join(g["result"] for g in v.get("grading", [])) or "grader never ran"
-                st.markdown(f"Verdicts: {seq}. Final status: {v.get('status') or 'unknown'}.")
+            latest = (state.get("last_review") or {}).get("analysis_markdown")
+            compare = st.checkbox("Compare with the latest run in this session", key="hist_compare",
+                                  disabled=not latest)
+            shown = history.result_report(rec) or "(no report saved)"
+            if compare and latest:
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.caption("Selected run")
+                    _page(render_report(shown, title="Selected run", icon="", muted=True).data, 560)
+                with c_b:
+                    st.caption("Latest run")
+                    _page(render_report(latest, title="Latest run", icon="").data, 560)
+            else:
+                _page(render_report(shown, title="Result report", icon="").data, 560)
+
+            agent_report = (rec.get("agent") or {}).get("report", "")
+            if rec.get("verify") and agent_report:
+                with st.expander("Deep agent report (before verification)"):
+                    _page(render_report(agent_report, title="Deep agent report", icon="",
+                                        muted=True).data, 480)
+            if rec.get("check"):
+                with st.expander("Rubric check"):
+                    _page(_check_html(rec["check"]), 230)
+            if rec.get("verify"):
+                with st.expander("Verification loop"):
+                    v = rec["verify"]
+                    seq = " then ".join(g["result"] for g in v.get("grading", [])) or "grader never ran"
+                    st.markdown(f"Verdicts: {seq}. Final status: {v.get('status') or 'unknown'}.")
+
+            st.markdown("**Run the next steps on this run**")
+            n1, n2, _npad = st.columns([1.5, 1.7, 4])
+            check_here = n1.button("Rubric check", key="hist_check_btn", width="stretch",
+                                   disabled=not agent_report)
+            verify_here = n2.button("Verification loop", key="hist_verify_btn", width="stretch")
+            if check_here:
+                res = _guarded("Checking this run's report against the rubric...",
+                               lambda: core.run_check(rec["ticket_id"], rec.get("ticket_text", ""), agent_report))
+                if res:
+                    _save_history("rubric check", lambda: core.save_check(rec["id"], res))
+                    if state.get("history") is None:
+                        st.rerun()
+            if verify_here:
+                def _verify_here():
+                    keep = core.get_ticket_text(rec["ticket_id"])
+                    try:
+                        return core.run_verification(rec["ticket_id"], rec.get("ticket_text", ""))
+                    finally:
+                        if keep:  # do not leave this run's older text in the ticket store
+                            core.set_ticket(rec["ticket_id"], keep)
+                res = _guarded("Running the verification loop on this ticket. This can take several minutes...",
+                               _verify_here)
+                if res:
+                    _save_history("verification loop", lambda: core.save_verify(
+                        rec["id"], rec["ticket_id"], rec.get("ticket_text", ""), res))
+                    if state.get("history") is None:
+                        st.rerun()
 with tab_agents:
     st.code(core.read_agents_md(), language="markdown")
 

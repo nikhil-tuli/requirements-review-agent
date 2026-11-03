@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 MAX_RUNS = 30
 
 STEP_LABELS = {"agent": "Agent", "check": "Rubric check", "verify": "Verified"}
+SOURCE_LABELS = {"manual": "Manual", "event": "Event"}
 
 
 def text_hash(text: str) -> str:
@@ -32,7 +33,7 @@ def text_hash(text: str) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 # ---------------------------------------------------------------------------
@@ -188,13 +189,25 @@ def new_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
 
-def base_record(ticket_id: str, ticket_text: str, model: str, agents_hash: str, rubric_hash: str) -> Dict[str, Any]:
+def base_record(ticket_id: str, ticket_text: str, model: str, agents_hash: str, rubric_hash: str,
+                source: str = "manual", commit: str = "", actor: str = "",
+                trigger: str = "") -> Dict[str, Any]:
+    """source is "manual" (run from the app) or "event" (run by a GitHub Action)."""
     return {
         "id": new_id(), "created_at": _now_iso(), "ticket_id": ticket_id,
         "ticket_text": ticket_text, "ticket_hash": text_hash(ticket_text),
         "model": model, "agents_md_hash": agents_hash, "rubric_hash": rubric_hash,
-        "kinds": [],
+        "kinds": [], "source": source, "commit": commit, "actor": actor, "trigger": trigger,
     }
+
+
+def source_of(rec: Dict[str, Any]) -> str:
+    """Older records have no source tag; they were all run by hand."""
+    return rec.get("source") or "manual"
+
+
+def source_label(rec: Dict[str, Any]) -> str:
+    return SOURCE_LABELS.get(source_of(rec), source_of(rec).title())
 
 
 def _add_kind(rec: Dict[str, Any], kind: str) -> None:
@@ -262,7 +275,8 @@ def summary_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows = []
     for r in records:
         when = r["created_at"][:16].replace("T", " ") + " UTC"
-        rows.append({"Time": when, "Ticket": r.get("ticket_id", ""), "Steps": steps_label(r),
+        rows.append({"Time": when, "Ticket": r.get("ticket_id", ""), "Source": source_label(r),
+                     "Steps": steps_label(r),
                      "Rubric": rubric_result(r), "Tokens": int(r.get("tokens_total", 0) or 0),
                      "Model": r.get("model", "")})
     return rows
