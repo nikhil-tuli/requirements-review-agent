@@ -186,17 +186,17 @@ with left:
     st.selectbox("Jira", _choices(), key="ticket", on_change=_on_ticket_change)
     if state["ticket"] == NEW:
         st.text_input("New Jira ID (blank for automatic)", key="new_id")
-    up = st.file_uploader("Upload Jira .txt or .md", type=["txt", "md"], key="upload")
-    if up is not None and state.get("_upload_id") != up.file_id:
-        state["_upload_id"] = up.file_id
-        state["text"] = up.getvalue().decode("utf-8", "replace").strip()
+    # Upload is switched off for now. To bring it back, remove the leading "# " on the lines below.
+    # up = st.file_uploader("Upload Jira .txt or .md", type=["txt", "md"], key="upload")
+    # if up is not None and state.get("_upload_id") != up.file_id:
+    #     state["_upload_id"] = up.file_id
+    #     state["text"] = up.getvalue().decode("utf-8", "replace").strip()
 with right:
     st.text_area("Requirement text", key="text", height=190)
     save_clicked = st.button("Save Jira Updates", key="save_btn")
 
-r1, r2, _pad = st.columns([1.3, 3, 4], vertical_alignment="center")
+r1, _pad = st.columns([1.3, 7])
 run_clicked = r1.button("Run deep agent", key="run_btn", type="primary", width="stretch")
-simulate = r2.checkbox("Simulate 2 Jira failures (retry demo)", key="simulate")
 
 if save_clicked:
     if not state["text"].strip():
@@ -215,8 +215,7 @@ if run_clicked:
     else:
         tid = _resolve_id()
         res = _guarded("Running the deep agent. This can take a minute or two...",
-                       lambda: core.run_review(tid, state["text"],
-                                               simulated_failures=2 if simulate else 0))
+                       lambda: core.run_review(tid, state["text"]))
         if res:
             run = res["run"]
             state["prev_review"] = state.get("last_review")
@@ -247,7 +246,7 @@ view = state.get("review_view")
 HIST_TAB = "Run history (last 30)"
 linked_run = st.query_params.get("run", "")
 tab_report, tab_trace, tab_hist, tab_agents = st.tabs(
-    ["analysis.md", "Trace", HIST_TAB, "AGENTS.md (read-only)"],
+    ["Analysis md", "Trace", HIST_TAB, "Agents md (read-only)"],
     default=HIST_TAB if linked_run else None)
 with tab_report:
     if view:
@@ -263,7 +262,7 @@ with tab_trace:
         st.info("Run the deep agent to see the step-by-step trace here.")
 with tab_hist:
     records = _history()
-    top1, top2, top3, top4 = st.columns([3, 1, 1.2, 1.4], vertical_alignment="center")
+    top1, top2, top3 = st.columns([3.4, 1, 1.6], vertical_alignment="center")
     top1.caption(f"Stored in: {core.history_description()}")
     if top2.button("Refresh", key="hist_refresh", width="stretch"):
         state["history"] = None
@@ -273,9 +272,7 @@ with tab_hist:
     if not records:
         st.info("No runs saved yet. Run the deep agent and it will appear here.")
     else:
-        top3.download_button("Export JSON", json.dumps(records, indent=2), file_name="run_history.json",
-                             mime="application/json", key="hist_export_json", width="stretch")
-        top4.download_button("Export summary CSV",
+        top3.download_button("Export summary CSV",
                              pd.DataFrame(history.summary_rows(records)).to_csv(index=False),
                              file_name="run_history.csv", mime="text/csv",
                              key="hist_export_csv", width="stretch")
