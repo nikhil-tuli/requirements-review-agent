@@ -127,8 +127,32 @@ def _write_meta(path: Path, ticket_id: str, kind: str, usage: Dict[str, Any], ex
 # Deep agent run
 # ---------------------------------------------------------------------------
 
+def is_tool_glitch(error: Exception) -> bool:
+    """Groq sometimes rejects a malformed tool call from gpt-oss (400 tool_use_failed)."""
+    text = str(error).lower()
+    return "tool_use_failed" in text or "tool call validation failed" in text
+
+
+def retry_tool_glitch(fn, attempts: int = 3, wait: float = 5.0):
+    """Run fn, retrying a few times only on transient tool-call glitches."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            if i == attempts - 1 or not is_tool_glitch(e):
+                raise
+            print(f"Tool-call glitch, retrying in {wait:.0f}s (attempt {i + 2} of {attempts})...")
+            time.sleep(wait)
+
+
 def run_review(ticket_id: str, requirement_doc: str, simulated_failures: int = 0,
                max_turns: int = dh.MAX_TURNS) -> Dict[str, Any]:
+    return retry_tool_glitch(lambda: _run_review_once(ticket_id, requirement_doc,
+                                                      simulated_failures, max_turns))
+
+
+def _run_review_once(ticket_id: str, requirement_doc: str, simulated_failures: int = 0,
+                     max_turns: int = dh.MAX_TURNS) -> Dict[str, Any]:
     check_api_key()
     set_ticket(ticket_id, requirement_doc)
     agent = dh.build_review_agent(model=MODEL, max_turns=max_turns,
