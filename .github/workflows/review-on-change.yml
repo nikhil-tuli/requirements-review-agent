@@ -1,0 +1,49 @@
+name: Review changed requirement
+
+# Runs when jira_tickets.json changes on main, or when someone with write access
+# clicks "Run workflow" and gives a ticket ID. Only people with write access to the
+# repository can do either, so strangers cannot start runs.
+on:
+  push:
+    branches: [main]
+    paths: ["jira_tickets.json"]
+  workflow_dispatch:
+    inputs:
+      ticket_id:
+        description: "Ticket ID to review (for example AUTH-142)"
+        required: true
+
+permissions:
+  contents: write   # needed to comment on the commit
+
+# One review at a time. A second run waits for the first.
+concurrency:
+  group: requirement-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the script compares the tickets file with the previous commit
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Review the changed ticket
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_URL: ${{ vars.APP_URL }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          TICKET_ID: ${{ github.event.inputs.ticket_id }}
+        run: python run_event.py
