@@ -38,25 +38,70 @@ BASE_DIR = Path(__file__).resolve().parent
 # Finding the ticket to review
 # ---------------------------------------------------------------------------
 
-def tickets_at(rev: str) -> Dict[str, str]:
-    """The tickets file as it was at a commit. Empty if there is no such commit or file."""
-    if not rev or rev == ZERO_SHA:
-        return {}
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=BASE_DIR, capture_output=True, text=True)
+
+
+def read_tickets_at(rev: str) -> Tuple[str, object]:
+    """The tickets file at a commit, as (state, value).
+
+    state is "ok" (value = the tickets), "no_commit", "no_file", or "invalid"
+    (value = the error). A broken file is never treated as an empty one.
+    """
+    if not rev or rev == ZERO_SHA or _git("cat-file", "-e", f"{rev}^{{commit}}").returncode != 0:
+        return "no_commit", None
+    shown = _git("show", f"{rev}:{TICKETS_FILE}")
+    if shown.returncode != 0:
+        return "no_file", None
     try:
-        out = subprocess.run(["git", "show", f"{rev}:{TICKETS_FILE}"], cwd=BASE_DIR,
-                             capture_output=True, text=True, check=True).stdout
-        return json.loads(out)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
-        return {}
+        data = json.loads(shown.stdout)
+    except json.JSONDecodeError as e:
+        return "invalid", e
+    if not isinstance(data, dict):
+        return "invalid", ValueError("the file must be a JSON object of ticket IDs and texts")
+    return "ok", data
+
+
+def base_tickets(before: str, after: str) -> Tuple[Optional[Dict[str, str]], str]:
+    """The tickets to compare against, and a note on where they came from.
+
+    Normally the version before the push. If that version is broken or missing, use
+    the last readable earlier version instead. Returns (None, note) when earlier
+    versions exist but none can be read, because then nobody can tell what changed.
+    """
+    state, value = read_tickets_at(before)
+    if state == "ok":
+        return value, ""
+    if state == "no_file":
+        return {}, "the file did not exist before this push"
+    if before == ZERO_SHA or not before:
+        return {}, "new branch"
+    log = _git("log", "--format=%H", "-n", "50", after, "--", TICKETS_FILE)
+    earlier = [sha for sha in log.stdout.split() if sha != after] if log.returncode == 0 else []
+    for sha in earlier:
+        state, value = read_tickets_at(sha)
+        if state == "ok":
+            return value, f"the previous version could not be read, so compared with the last valid one ({sha[:7]})"
+        if state == "no_file":
+            return {}, "the file did not exist earlier"
+    if not earlier:
+        return {}, "the file first appears in this push"
+    return None, "no earlier version of the file could be read"
 
 
 def tickets_now() -> Dict[str, str]:
-    return json.loads((BASE_DIR / TICKETS_FILE).read_text())
+    """The current tickets file. Raises json.JSONDecodeError if it is broken."""
+    data = json.loads((BASE_DIR / TICKETS_FILE).read_text())
+    if not isinstance(data, dict):
+        raise json.JSONDecodeError("the file must be a JSON object of ticket IDs and texts", "", 0)
+    return data
 
 
 def changed_tickets(old: Dict[str, str], new: Dict[str, str]) -> List[str]:
-    """IDs that are new or whose text changed, in file order."""
-    return [tid for tid, text in new.items() if old.get(tid) != text]
+    """New tickets first, then edited ones, each group in file order."""
+    added = [tid for tid in new if tid not in old]
+    edited = [tid for tid, text in new.items() if tid in old and old[tid] != text]
+    return added + edited
 
 
 def choose(changed: List[str], new: Dict[str, str],
@@ -147,6 +192,11 @@ def post_commit_comment(repo: str, sha: str, body: str, token: str) -> bool:
     return False
 
 
+def problem_markdown(title: str, detail: str, run_url: str = "") -> str:
+    out = f"### Requirement review stopped: {title}\n{detail}\n"
+    return out + (f"\n[Action run]({run_url})" if run_url else "")
+
+
 def write_job_summary(markdown: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
@@ -204,14 +254,36 @@ def main(argv: Optional[List[str]] = None) -> int:
               + (store.note or "Set the NEON_DATABASE_URL repository secret."), file=sys.stderr)
         return 1
 
-    new = tickets_now()
+    def stop(title: str, detail: str) -> int:
+        body = problem_markdown(title, detail, run_url)
+        print(body, file=sys.stderr)
+        write_job_summary(body)
+        if token and repo and sha:
+            post_commit_comment(repo, sha, body, token)
+        return 1
+
+    try:
+        new = tickets_now()
+    except json.JSONDecodeError as e:
+        return stop(f"{TICKETS_FILE} is not valid JSON",
+                    f"Line {e.lineno}, column {e.colno}: {e.msg}. Fix the file and commit again. "
+                    "No tokens were used.")
+
     if args.ticket:  # started by hand: review exactly this ticket
         if args.ticket not in new:
             print(f"Ticket {args.ticket!r} is not in {TICKETS_FILE}.", file=sys.stderr)
             return 1
         chosen, skipped, already, trigger = args.ticket, [], [], "dispatch"
     else:  # a push: review the first new or changed ticket
-        changed = changed_tickets(tickets_at(args.before), new)
+        base, note = base_tickets(args.before, args.after)
+        if base is None:
+            return stop("cannot tell which ticket changed",
+                        f"Earlier versions of {TICKETS_FILE} are not valid JSON ({note}). "
+                        "Start the review by hand: Run workflow and enter the ticket ID. "
+                        "No tokens were used.")
+        if note:
+            print(f"Comparing tickets: {note}")
+        changed = changed_tickets(base, new)
         chosen, skipped, already = choose(changed, new, core.already_reviewed)
         trigger = "push"
 

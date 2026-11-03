@@ -51,7 +51,12 @@ for _key in ("GROQ_API_KEY", "NEON_DATABASE_URL"):
     except Exception:  # noqa: BLE001  (no secrets file locally is fine)
         pass
 
-import core  # noqa: E402  (after the keys are set)
+try:
+    import core  # noqa: E402  (after the keys are set)
+except json.JSONDecodeError as _e:
+    st.error(f"jira_tickets.json is not valid JSON: line {_e.lineno}, column {_e.colno}, {_e.msg}. "
+             "Fix the file in the repository and reload the app.")
+    st.stop()
 import history  # noqa: E402
 from visualization_helpers import (  # noqa: E402
     render_report, render_review_trace, render_verification_summary,

@@ -56,7 +56,8 @@ App: https://requirements-review-agent.streamlit.app
 - A GitHub Action (`.github/workflows/review-on-change.yml`) starts when `jira_tickets.json` changes on `main`
 - Manual start: for a ticket already in the file (for example one that was skipped, or after a failed run), click **Run workflow** and enter its ID
 - Only people with write access to the repo can start it
-- It reviews **one** ticket per run: the first new or changed ticket not already reviewed with the same text. Other changed tickets are listed as not reviewed and can be started with **Run workflow**
+- It reviews **one** ticket per run: new tickets before edited ones, skipping any already reviewed with the same text. Other changed tickets are listed as not reviewed and can be started with **Run workflow**
+- If the previous version of `jira_tickets.json` is broken, it compares with the last valid version. If there is no valid earlier version, or the current file is not valid JSON, it stops with a clear comment (the line and column for broken JSON) and uses no tokens
 - It runs the deep agent only, saves the full report to Run history (Source = Event), and posts a short summary with a link as a comment on the commit and on the Action run page
 - The rubric check and verification loop stay on demand from the app
 - Runs one at a time
